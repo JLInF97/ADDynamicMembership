@@ -16,9 +16,28 @@
     It is highly recommended to schedule this script to run every certain time (e.g. 5 minutes)
     so that membership updates become truly dynamic.
 
-    The syntax of the filters to use on the containers attributes is described in the Microsoft
-    documentation. See LINK section of this help.
+    FILTER SYNTAX
+    =============
+    The syntax of the filters must be:
+        <property> <operator> '<value>'
+    where
+        - Property is the object property or attribute in Active Directory. e.g., Displayname, objectClass
+        - Operator is one of the comparison operators in Powershell. e.g., -eq
+          https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_comparison_operators
+        - Value is the finding value for the property. MUST always be between single quotes.
+    NEVER put the filter between double quotes, just enclose the values between singles quotes.
+    It is possible to join some filters using join operatos like -or, -and
 
+    Examples:
+        - Find objects where name starts with john:
+          name -like 'john*'
+        
+        - Find computers in Sales OU
+          objectClass -eq 'computer' -and distinguishedname -like '*OU=Sales,DC=Contoso,DC=Com'
+
+
+    LOGGING
+    =======
     The script generates two kind of LOG files:
         - *.log: A summary of the script execution. Here you can review the actions and the errors that the script commited.
         - *.csv: A CSV table containing detailed information about each membership change made by the script.
@@ -40,10 +59,11 @@
     How to write the filters:
     https://learn.microsoft.com/en-us/powershell/module/activedirectory/about/about_activedirectory_filter
 .NOTES
-    Version:            1.2.0 - Help written.
+    Version:            2.0.0 - Modified the way how to process filters. Now the script use where-object filter system.
+                        1.2.0 - Help written.
                         1.1.0 - Included OU's as dynamic containers.
                         1.0.0 - Initial release.
-    Last Generated:     21 Nov 2024
+    Last Generated:     29 May 2025
     Developed by:       JLInF
     Contact info:       
     License:            MIT License
@@ -107,6 +127,35 @@ function Set-LogData{
     return $logdata
 }
 
+# Converts filter string to Where-Object filter syntax
+# "name -eq 'john'" -> {$_.name -eq 'john'}
+function ConvertTo-WOFilter{
+    param(
+        [Parameter(Mandatory=$true)]$AttrUserString
+    )
+
+    $AttrUserString_Divided=$AttrUserString.split(" ")
+    $WordsToReplace=$AttrUserString_Divided | Where-Object {$_ -notlike "'*" -and $_ -notlike "-*" -and $_ -notlike "(*" -and $_ -ne "true" -and $_ -ne "false"}
+    $WordsToReplaceParenthesis=$AttrUserString_Divided| Where-Object {$_ -like "(*"}
+
+    $WordsToReplace | ForEach-Object{
+        $token=$_
+        $replacement='$$_.'+$token
+        $AttrUserString_Divided=$AttrUserString_Divided -replace "\b$token\b",$replacement
+    }
+
+    $WordsToReplaceParenthesis | ForEach-Object{
+        $token=$_
+        $replacement='($$_.'+$token.Trim("(")
+        $AttrUserString_Divided=$AttrUserString_Divided -replace "\$token",$replacement
+    }
+
+    [string]$filter_string=$AttrUserString_Divided -join ' '
+    $Filter=[Scriptblock]::Create($filter_string)
+
+    $Filter
+}
+
 Start-Transcript -Path $LogPath -Append
 
 $domainDN=(Get-ADDomain).DistinguishedName
@@ -135,7 +184,8 @@ foreach ($dynamic_container in $dynamic_defined_containers){
     $filter=$dynamic_container.$Attribute
 
     # Objects that may be in the container
-    $query_objects=Get-ADObject -Filter "$filter"
+    $filterscript=ConvertTo-WOFilter -AttrUserString $filter
+    $query_objects=Get-ADObject -Filter "objectclass -ne 'organizationalUnit'" -Properties * | Where-Object -FilterScript $filterscript
 
     # Dynamic Group
     if ($dynamic_container.ObjectClass -eq "group"){
